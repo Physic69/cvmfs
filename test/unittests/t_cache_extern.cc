@@ -52,6 +52,7 @@ class MockCachePlugin : public CachePlugin {
     last_id = 0;
     last_reponame = NULL;
     last_client_instance = NULL;
+    delay = 0;
   }
 
   virtual ~MockCachePlugin() { }
@@ -68,6 +69,7 @@ class MockCachePlugin : public CachePlugin {
   string new_object_content;
   int known_object_refcnt;
   int next_status;
+  int delay;
   unsigned listing_nitems;
   cvmfs::EnumObjectType listing_type;
   uint64_t last_id;
@@ -113,6 +115,10 @@ class MockCachePlugin : public CachePlugin {
                                   uint64_t offset,
                                   uint32_t *size,
                                   unsigned char *buffer) {
+    if (delay < 0) {
+      while (true) { SafeSleepMs(1000); }
+    }
+    
     GetSession(&last_id, &last_reponame, &last_client_instance);
     if (next_status >= 0)
       return static_cast<cvmfs::EnumStatus>(next_status);
@@ -385,6 +391,21 @@ TEST_F(T_ExternalCacheManager, Pread) {
   EXPECT_EQ(1, cache_mgr_->Pread(fd, buffer, 1, len - 1));
   EXPECT_EQ(mock_plugin_->known_object_content[len - 1], buffer[0]);
   EXPECT_EQ(0, cache_mgr_->Close(fd));
+}
+
+
+TEST_F(T_ExternalCacheManager, Timeout) {
+  int fd = cache_mgr_->Open(
+      CacheManager::LabeledObject(mock_plugin_->known_object));
+  EXPECT_GE(fd, 0);
+
+  mock_plugin_->delay = -1;// Set delay to infinite 
+
+  char buffer[64];
+
+  int64_t len = cache_mgr_->Pread(fd, buffer, 64, 0);
+  EXPECT_EQ(-TIMEOUT, len);  //Sh0uld never reach!!
+   EXPECT_EQ(0, cache_mgr_->Close(fd));
 }
 
 
