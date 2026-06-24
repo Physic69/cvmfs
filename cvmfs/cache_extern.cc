@@ -91,13 +91,13 @@ bool ExternalCacheManager::AcquireQuotaManager(QuotaManager *quota_mgr) {
 
 
 void ExternalCacheManager::CallRemotely(ExternalCacheManager::RpcJob *rpc_job) {
-  if (!spawned_) {
-    transport_.SendFrame(rpc_job->frame_send());
+  if (!spawned_) { // single threaded
+    transport_.SendFrame(rpc_job->frame_send()); // sends rpc req directly
     const uint32_t save_att_size = rpc_job->frame_recv()->att_size();
     bool again;
     do {
       again = false;
-      const bool retval = transport_.RecvFrame(rpc_job->frame_recv());
+      const bool retval = transport_.RecvFrame(rpc_job->frame_recv()); // thread immediately tries to read socket itself.. Blocks itself until cache deamon replies
       assert(retval);
       if (rpc_job->frame_recv()->IsMsgOutOfBand()) {
         google::protobuf::MessageLite *msg_typed = rpc_job->frame_recv()
@@ -109,16 +109,16 @@ void ExternalCacheManager::CallRemotely(ExternalCacheManager::RpcJob *rpc_job) {
       }
     } while (again);
   } else {
-    Signal signal;
+    Signal signal; //threads
     {
       const MutexLockGuard guard(lock_inflight_rpcs_);
-      inflight_rpcs_.push_back(RpcInFlight(rpc_job, &signal));
+      inflight_rpcs_.push_back(RpcInFlight(rpc_job, &signal)); //adds the rpc req to pending task
     }
     {
       const MutexLockGuard guard(lock_send_fd_);
-      transport_.SendFrame(rpc_job->frame_send());
+      transport_.SendFrame(rpc_job->frame_send()); //send the rpc req
     }
-    signal.Wait();
+    signal.Wait(); //waits for the rpc resopne....
   }
 }
 
@@ -489,7 +489,7 @@ int64_t ExternalCacheManager::GetSize(int fd) {
 }
 
 
-void *ExternalCacheManager::MainRead(void *data) {
+void *ExternalCacheManager::MainRead(void *data) { //cache demon thread
   ExternalCacheManager *cache_mgr = reinterpret_cast<ExternalCacheManager *>(
       data);
   LogCvmfs(kLogCache, kLogDebug, "starting external cache reader thread");
@@ -498,7 +498,7 @@ void *ExternalCacheManager::MainRead(void *data) {
   while (true) {
     CacheTransport::Frame frame_recv;
     frame_recv.set_attachment(buffer, cache_mgr->max_object_size_);
-    const bool retval = cache_mgr->transport_.RecvFrame(&frame_recv);
+    const bool retval = cache_mgr->transport_.RecvFrame(&frame_recv); //receives the rpc response
     if (!retval)
       break;
 
@@ -550,7 +550,7 @@ void *ExternalCacheManager::MainRead(void *data) {
       continue;
     }
     rpc_inflight.rpc_job->frame_recv()->MergeFrom(frame_recv);
-    rpc_inflight.signal->Wakeup();
+    rpc_inflight.signal->Wakeup(); //wakes up the blocked thread waiting for the rpc response
   }
 
   if (!cache_mgr->terminated_) {
@@ -604,16 +604,16 @@ int64_t ExternalCacheManager::Pread(int fd,
   while (nbytes < size) {
     const uint64_t batch_size = std::min(
         size - nbytes, static_cast<uint64_t>(max_object_size_));
-    cvmfs::MsgReadReq msg_read;
+    cvmfs::MsgReadReq msg_read; //protocol buffer msg...
     msg_read.set_session_id(session_id_);
     msg_read.set_req_id(NextRequestId());
     msg_read.set_allocated_object_id(&object_id);
     msg_read.set_offset(offset + nbytes);
     msg_read.set_size(batch_size);
-    RpcJob rpc_job(&msg_read);
+    RpcJob rpc_job(&msg_read); //puts msg into rpc  job
     rpc_job.set_attachment_recv(reinterpret_cast<char *>(buf) + nbytes,
-                                batch_size);
-    CallRemotely(&rpc_job);
+                                batch_size); //attaches buffer
+    CallRemotely(&rpc_job); //sends this req data to ext_cache
     msg_read.release_object_id();
 
     cvmfs::MsgReadReply *msg_reply = rpc_job.msg_read_reply();
