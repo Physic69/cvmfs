@@ -71,17 +71,7 @@ static const ArchDesc arch_x86_64 = {
   56    /* prpsinfo_args  */
 };
 
-/**
- * AArch64 (ARM64) architecture descriptor.
- *
- * Register layout in elf_prstatus.pr_reg (struct user_pt_regs):
- *   [0..30]  x0–x30  (x30 = link register / LR)
- *   [31]     sp
- *   [32]     pc
- *   [33]     pstate
- *
- * Syscall ABI: x8=nr, x0=a0, x1=a1, x2=a2, x3=a3, x4=a4, x5=a5
- */
+
 static const ArchDesc arch_aarch64 = {
   "aarch64",
   EM_AARCH64,
@@ -160,16 +150,7 @@ struct ThreadInfo {
   unsigned long regs[kMaxNgreg];
 };
 
-/**
- * Decides whether a memory region should be included in the core dump.
- * Skips kernel-mapped regions that cause EIO on pread().
- *
- * In kDumpStandard mode, read-only file-backed regions of shared
- * libraries are skipped because GDB can reload them from disk via
- * NT_FILE.  The dynamic linker and main executable are always kept
- * because GDB needs _DYNAMIC -> DT_DEBUG -> r_debug -> link_map
- * from the linker's memory to discover shared libraries.
- */
+// Decides whether a memory region should be included in the core dump.
 static bool should_dump_region(const MemRegion *r,
                               const DumperContext *ctx) {
   if (!r->readable) return false;
@@ -223,11 +204,7 @@ vector<MemRegion> parse_maps(int pid, DumperContext *ctx) {
     unsigned long inode;
     char name[256] = "";
 
-    /**
-     * /proc/pid/maps format:
-     * addr-addr perms offset major:minor inode [name]
-     * major:minor are HEX (use %x not %d)
-     */
+
     sscanf(line, "%lx-%lx %4s %lx %x:%x %lu %255[^\n]",
          &start, &end, perms, &offset,
          &major, &minor, &inode, name);
@@ -410,17 +387,7 @@ vector<char> read_auxv(int pid) {
   return data;
 }
 
-/**
- * Heuristic RBP recovery.
- *
- * /proc/pid/syscall provides RSP and RIP but not RBP.  Without RBP,
- * GDB backtraces stop at frame 1 on binaries compiled with frame pointers.
- *
- * We scan the stack for values that look like valid frame pointers by
- * checking if *(candidate+8) falls in an executable mapping (return address)
- * and *(candidate) chains to another stack address.  The candidate with the
- * longest valid chain is selected as the recovered RBP.
- */
+// Scans the stack for valid frame pointer chains to recover RBP, enabling complete GDB backtraces.
 static bool is_executable_addr(unsigned long addr,
                 const MemRegion *regions,
                 int num_regions) {
