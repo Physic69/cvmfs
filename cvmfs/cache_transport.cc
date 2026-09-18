@@ -19,8 +19,9 @@
 #include "util/posix.h"
 #include "util/smalloc.h"
 
-// TODO(jblomer): Check for possible starvation of plugin by dying clients
-// (blocking read).  Probably only relevant for TCP sockets.
+// Blocking reads are bounded by SO_RCVTIMEO set in the CacheTransport
+// constructor (kRecvTimeoutSec).  This prevents indefinite hangs when a
+// cache plugin crashes or deadlocks.
 
 using namespace std;  // NOLINT
 
@@ -283,12 +284,20 @@ void CacheTransport::Frame::UnwrapMsg() {
 CacheTransport::CacheTransport(int fd_connection)
     : fd_connection_(fd_connection), flags_(0) {
   assert(fd_connection_ >= 0);
+  struct timeval tv;
+  tv.tv_sec = kRecvTimeoutSec;
+  tv.tv_usec = 0;
+  setsockopt(fd_connection_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 }
 
 
 CacheTransport::CacheTransport(int fd_connection, uint32_t flags)
     : fd_connection_(fd_connection), flags_(flags) {
   assert(fd_connection_ >= 0);
+  struct timeval tv;
+  tv.tv_sec = kRecvTimeoutSec;
+  tv.tv_usec = 0;
+  setsockopt(fd_connection_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 }
 
 
@@ -438,8 +447,14 @@ bool CacheTransport::RecvFrame(CacheTransport::Frame *frame) {
 bool CacheTransport::RecvHeader(uint32_t *size, bool *has_attachment) {
   unsigned char header[kHeaderSize];
   const ssize_t nbytes = SafeRead(fd_connection_, header, kHeaderSize);
-  if ((nbytes < 0) || (static_cast<unsigned>(nbytes) != kHeaderSize))
+  if ((nbytes < 0) || (static_cast<unsigned>(nbytes) != kHeaderSize)) {
+    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+      LogCvmfs(kLogCache, kLogDebug | kLogSyslogErr,
+               "cache plugin unresponsive (timeout after %us)",
+               kRecvTimeoutSec);
+    }
     return false;
+  }
   if ((header[0] & (~kFlagHasAttachment)) != kWireProtocolVersion)
     return false;
   *has_attachment = header[0] & kFlagHasAttachment;

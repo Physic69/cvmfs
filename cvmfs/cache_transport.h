@@ -92,6 +92,13 @@ class CacheTransport {
   static const uint32_t kFlagSendIgnoreFailure = 0x01;
   static const uint32_t kFlagSendNonBlocking = 0x02;
 
+  /**
+   * Receive timeout in seconds applied to the connection socket via
+   * SO_RCVTIMEO.  Prevents indefinite blocking when the cache plugin
+   * crashes or deadlocks.
+   */
+  static const unsigned kRecvTimeoutSec = 30;
+
 
   /**
    * A single unit of data transfer contains a "typed" Msg... protobuf message
