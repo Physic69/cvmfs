@@ -25,6 +25,7 @@
 #include <unistd.h>
 #include <dirent.h>
 #include <elf.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/utsname.h>
 
@@ -538,6 +539,15 @@ size_t write_note(FILE *out, uint32_t type,
 }
 
 /**
+ * Returns the errno of a failed write on the stream, or 0 if none failed.
+ * Must be called right after the write, before errno is overwritten.
+ */
+static int stream_error(FILE *f) {
+  if (!ferror(f)) return 0;
+  return errno ? errno : EIO;
+}
+
+/**
  * Constructs a complete ELF core dump for the given PID.
  * Gathers memory maps, thread registers, and auxiliary vector from /proc,
  * performs heuristic RBP recovery, then writes a GDB-compatible core file.
@@ -774,8 +784,14 @@ int build_core(int pid, const char *output_path, DumperContext *ctx) {
            auxv_data.data(), auxv_sz);
   }
 
+  // Flush so the headers and notes are on disk before the bulk memory writes.
+  // Without them the core is unusable; with them, a core truncated later in
+  // the memory contents still has all threads' registers and file mappings.
+  const int notes_errno = (fflush(core) != 0) ? (errno ? errno : EIO) : 0;
+  int write_errno = notes_errno;
+
   // Finally, write the actual memory contents
-  for (int i = 0; i < num_regions; i++) {
+  for (int i = 0; i < num_regions && write_errno == 0; i++) {
     if (!should_dump_region(&regions[i], ctx)) continue;
 
     const size_t seg_size = regions[i].end - regions[i].start;
@@ -803,13 +819,33 @@ int build_core(int pid, const char *output_path, DumperContext *ctx) {
         addr += chunk;
         rem  -= chunk;
       }
+      if ((write_errno = stream_error(core)) != 0) break;
     }
   }
 
-  fclose(core);
   close(mem_fd);
-
-  // vectors clean up automatically
+  if (fclose(core) != 0 && write_errno == 0)
+    write_errno = errno;
+  struct stat st;
+  const bool is_regular = stat(output_path, &st) == 0 && S_ISREG(st.st_mode);
+  if (notes_errno != 0) {
+    fprintf(stderr, "Failed to write core dump to %s: %s\n",
+            output_path, strerror(notes_errno));
+    // Headers or notes incomplete: GDB cannot use the file.
+    // Only remove regular files, never e.g. a device node.
+    if (is_regular)
+      unlink(output_path);
+    return -1;
+  }
+  if (write_errno != 0) {
+    fprintf(stderr,
+      "Warning: writing core dump to %s failed: %s\n"
+      "  The core is truncated at %lld bytes. Register state and file\n"
+      "  mappings are complete, but some memory contents are missing.\n",
+      output_path, strerror(write_errno),
+      is_regular ? (long long)st.st_size : -1LL);
+    return -1;
+  }
 
   printf("Core dump successfully saved to %s\n", output_path);
 
