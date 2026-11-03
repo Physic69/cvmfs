@@ -106,7 +106,7 @@ enum DumpLevel {
 struct DumperContext {
   const ArchDesc *arch;
   DumpLevel level;
-  char exe_path[256];
+  string exe_path;
 };
 
 /**
@@ -167,7 +167,7 @@ static bool should_dump_region(const MemRegion *r,
       return true;
 
     // Always keep the main executable's regions.
-    if (ctx->exe_path[0] && r->name == ctx->exe_path)
+    if (!ctx->exe_path.empty() && r->name == ctx->exe_path)
       return true;
 
     // Skip large read-only file-backed regions (.text, .rodata)
@@ -196,18 +196,26 @@ vector<MemRegion> parse_maps(int pid, DumperContext *ctx) {
   FILE *f = fopen(path, "r");
   if (!f) { perror("Cannot open maps"); return regions; }
 
-  char line[512];
-  while (fgets(line, sizeof(line), f)) {
-    unsigned long start, end, offset;
-    char perms[5];
-    unsigned int major, minor;
-    unsigned long inode;
-    char name[256] = "";
+  // getline() grows the buffer as needed, so long paths are never split
+  char *line = NULL;
+  size_t line_cap = 0;
+  while (getline(&line, &line_cap, f) != -1) {
+    line[strcspn(line, "\n")] = '\0';
 
+    unsigned long start = 0, end = 0, offset = 0;
+    char perms[5] = "";
+    unsigned int major = 0, minor = 0;
+    unsigned long inode = 0;
+    int name_pos = 0;
 
-    sscanf(line, "%lx-%lx %4s %lx %x:%x %lu %255[^\n]",
+    // %n records where the (optional) path starts; anonymous maps have none
+    const int n = sscanf(line, "%lx-%lx %4s %lx %x:%x %lu %n",
          &start, &end, perms, &offset,
-         &major, &minor, &inode, name);
+         &major, &minor, &inode, &name_pos);
+    if (n < 7 || end <= start) {
+      fprintf(stderr, "  warning: skipping unparsable maps line: %s\n", line);
+      continue;
+    }
 
     MemRegion r;
     r.start      = start;
@@ -217,20 +225,18 @@ vector<MemRegion> parse_maps(int pid, DumperContext *ctx) {
     r.writable   = (perms[1] == 'w');
     r.executable = (perms[2] == 'x');
 
-    char *p = name;
-    while (*p == ' ') p++;
+    const char *p = line + name_pos;
     r.name = p;
 
     // First file-backed region in maps is the main executable.
     // Save its path so should_dump_region() can always keep it.
-    if (ctx->exe_path[0] == '\0' && p[0] == '/') {
-      strncpy(ctx->exe_path, p, sizeof(ctx->exe_path) - 1);
-      ctx->exe_path[sizeof(ctx->exe_path) - 1] = '\0';
-    }
+    if (ctx->exe_path.empty() && p[0] == '/')
+      ctx->exe_path = p;
 
     regions.push_back(r);
   }
 
+  free(line);
   fclose(f);
   return regions;
 }
@@ -813,7 +819,6 @@ int build_core(int pid, const char *output_path, DumperContext *ctx) {
 int dcoredumper_main(int argc, char *argv[]) {
   DumperContext ctx;
   ctx.level = kDumpStandard;
-  memset(ctx.exe_path, 0, sizeof(ctx.exe_path));
 
   if (!detect_arch(&ctx)) return 1;
 
