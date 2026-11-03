@@ -260,16 +260,23 @@ int read_thread_registers(int pid, int tid, unsigned long *regs,
     return -2;  // distinct from -1 (permission/read error)
 
   // Format: syscall_nr a0 a1 a2 a3 a4 a5 RSP RIP
-  unsigned long nr, a0, a1, a2, a3, a4, a5, rsp, rip;
+  // or "-1 RSP RIP" if blocked in the kernel outside a syscall (e.g. page fault)
+  long nr;
+  unsigned long a0, a1, a2, a3, a4, a5, rsp, rip;
 
   const int n = sscanf(line,
-    "%lu 0x%lx 0x%lx 0x%lx 0x%lx 0x%lx 0x%lx 0x%lx 0x%lx",
+    "%ld 0x%lx 0x%lx 0x%lx 0x%lx 0x%lx 0x%lx 0x%lx 0x%lx",
     &nr, &a0, &a1, &a2, &a3, &a4, &a5, &rsp, &rip);
 
-  if (n < 9) {
+  const bool in_syscall = !(n == 3 && nr < 0);
+  if (!in_syscall) {
+    rsp = a0;
+    rip = a1;
+  } else if (n < 9) {
     // Fallback: parse as space-separated tokens (some kernels omit 0x prefix)
+    unsigned long nr_u;
     unsigned long *vals[] = {
-      &nr, &a0, &a1, &a2, &a3, &a4, &a5, &rsp, &rip
+      &nr_u, &a0, &a1, &a2, &a3, &a4, &a5, &rsp, &rip
     };
     char copy[512];
     strncpy(copy, line, sizeof(copy));
@@ -280,6 +287,7 @@ int read_thread_registers(int pid, int tid, unsigned long *regs,
       tok = strtok(NULL, " \t\n");
     }
     if (i < 9) return -1;
+    nr = static_cast<long>(nr_u);
   }
 
   memset(regs, 0, ctx->arch->ngreg * sizeof(unsigned long));
@@ -287,6 +295,14 @@ int read_thread_registers(int pid, int tid, unsigned long *regs,
   /* SP and IP are always the last two fields in /proc/syscall output */
   regs[ctx->arch->reg_sp] = rsp;
   regs[ctx->arch->reg_ip] = rip;
+
+  if (ctx->arch == &arch_x86_64) {
+    regs[17] = 0x33; /* CS       */
+    regs[20] = 0x2b; /* SS       */
+  }
+  /* Not in a syscall: no syscall number or arguments to map */
+  if (!in_syscall)
+    return 0;
 
   /* Map syscall arguments into the architecture's register layout */
   if (ctx->arch == &arch_x86_64) {
@@ -299,8 +315,6 @@ int read_thread_registers(int pid, int tid, unsigned long *regs,
     regs[7]  = a3;   /* R10      */
     regs[9]  = a4;   /* R8       */
     regs[8]  = a5;   /* R9       */
-    regs[17] = 0x33; /* CS       */
-    regs[20] = 0x2b; /* SS       */
   } else if (ctx->arch == &arch_aarch64) {
     /* AArch64 syscall ABI: x8=nr, x0=a0, x1=a1, x2=a2, x3=a3, x4=a4, x5=a5 */
     regs[8]  = nr;   /* x8  (syscall number) */
