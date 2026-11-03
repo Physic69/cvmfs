@@ -31,6 +31,10 @@
 
 using namespace std;  // NOLINT
 
+// Everything except dcoredumper_main() is file-local, so that nothing clashes
+// with other code linked into the cvmfs2 stub
+namespace {
+
 constexpr size_t NoteAlign(size_t sz) { return (sz + 3) & ~3; }
 constexpr size_t kPageSize = 4096;
 
@@ -851,6 +855,8 @@ int build_core(int pid, const char *output_path, DumperContext *ctx) {
 
   return 0;
 }
+
+}  // anonymous namespace
 
 int dcoredumper_main(int argc, char *argv[]) {
   DumperContext ctx;
